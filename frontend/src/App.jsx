@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import "./App.css";
 
-const API = "http://localhost:5000";
+const API = "https://speech-ai-production-f742.up.railway.app";
 
 const EMOJIS = ["🌟", "💬", "🎉", "👏", "🌈"];
 
