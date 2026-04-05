@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import "./App.css";
 
-const API = "https://speech-ai-production-f742.up.railway.app";
+const API = import.meta.env.VITE_API_URL || "https://speech-ai-production-f742.up.railway.app";
 
 const EMOJIS = ["🌟", "💬", "🎉", "👏", "🌈"];
 
