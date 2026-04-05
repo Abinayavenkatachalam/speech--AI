@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import "./App.css";
 
 const API = import.meta.env.VITE_API_URL || "https://speech-ai-production-f742.up.railway.app";
@@ -6,19 +6,18 @@ const API = import.meta.env.VITE_API_URL || "https://speech-ai-production-f742.u
 const EMOJIS = ["🌟", "💬", "🎉", "👏", "🌈"];
 
 export default function App() {
-  const [phase, setPhase] = useState("idle"); // idle | recording | processing | done | error
+  const [phase, setPhase] = useState("idle");
   const [raw, setRaw] = useState("");
   const [corrected, setCorrected] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [history, setHistory] = useState([]);
-  const [tab, setTab] = useState("speak"); // speak | teach
+  const [tab, setTab] = useState("speak");
   const [teachWrong, setTeachWrong] = useState("");
   const [teachCorrect, setTeachCorrect] = useState("");
   const [teachStatus, setTeachStatus] = useState("");
   const [emoji, setEmoji] = useState("🌟");
 
-  const mediaRecorderRef = useRef(null);
-  const chunksRef = useRef([]);
+  const recognitionRef = useRef(null);
 
   const speak = (text) => {
     const utterance = new SpeechSynthesisUtterance(text);
@@ -27,64 +26,70 @@ export default function App() {
     window.speechSynthesis.speak(utterance);
   };
 
-  const startRecording = async () => {
+  const fixWithClaude = async (text) => {
+    try {
+      const res = await fetch(`${API}/fix`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text })
+      });
+      const data = await res.json();
+      return data.corrected || text;
+    } catch (e) {
+      return text;
+    }
+  };
+
+  const startRecording = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setErrorMsg("Speech recognition not supported. Please use Chrome or Edge browser!");
+      setPhase("error");
+      return;
+    }
+
     setPhase("recording");
     setRaw("");
     setCorrected("");
     setEmoji(EMOJIS[Math.floor(Math.random() * EMOJIS.length)]);
-    chunksRef.current = [];
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mr = new MediaRecorder(stream);
-      mediaRecorderRef.current = mr;
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-US";
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognitionRef.current = recognition;
 
-      mr.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
-      };
+    recognition.onresult = async (event) => {
+      const transcript = event.results[0][0].transcript;
+      setRaw(transcript);
+      setPhase("processing");
 
-      mr.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-        await sendAudio(blob);
-      };
+      const fixed = await fixWithClaude(transcript);
+      setCorrected(fixed);
+      setHistory((h) => [
+        { raw: transcript, corrected: fixed, time: new Date().toLocaleTimeString() },
+        ...h.slice(0, 9)
+      ]);
+      setPhase("done");
+      speak(fixed);
+    };
 
-      mr.start();
-    } catch (e) {
-      setErrorMsg("Microphone access denied. Please allow mic access.");
+    recognition.onerror = (e) => {
+      setErrorMsg("Microphone error: " + e.error);
       setPhase("error");
-    }
+    };
+
+    recognition.onend = () => {
+      if (phase === "recording") setPhase("idle");
+    };
+
+    recognition.start();
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && phase === "recording") {
-      mediaRecorderRef.current.stop();
-      setPhase("processing");
-    }
-  };
-
-  const sendAudio = async (blob) => {
-    const formData = new FormData();
-    formData.append("audio", blob, "recording.webm");
-
-    try {
-      const res = await fetch(`${API}/transcribe`, {
-        method: "POST",
-        body: formData,
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      setRaw(data.raw);
-      setCorrected(data.corrected);
-      setHistory((h) => [
-        { raw: data.raw, corrected: data.corrected, time: new Date().toLocaleTimeString() },
-        ...h.slice(0, 9),
-      ]);
-      setPhase("done");
-      speak(data.corrected);
-    } catch (e) {
-      setErrorMsg(e.message || "Something went wrong.");
-      setPhase("error");
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
     }
   };
 
@@ -97,7 +102,7 @@ export default function App() {
       const res = await fetch(`${API}/dataset`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ wrong: teachWrong.trim().toLowerCase(), correct: teachCorrect.trim().toLowerCase() }),
+        body: JSON.stringify({ wrong: teachWrong.trim().toLowerCase(), correct: teachCorrect.trim().toLowerCase() })
       });
       const data = await res.json();
       if (data.ok) {
@@ -106,7 +111,7 @@ export default function App() {
         setTeachCorrect("");
       }
     } catch (e) {
-      setTeachStatus("❌ Could not save. Is the server running?");
+      setTeachStatus("❌ Could not save.");
     }
   };
 
@@ -119,7 +124,6 @@ export default function App() {
 
   return (
     <div className="app">
-      {/* Decorative blobs */}
       <div className="blob blob1" />
       <div className="blob blob2" />
       <div className="blob blob3" />
@@ -133,32 +137,19 @@ export default function App() {
           </div>
         </div>
         <nav className="tabs">
-          <button className={tab === "speak" ? "tab active" : "tab"} onClick={() => setTab("speak")}>
-            🎤 Speak
-          </button>
-          <button className={tab === "teach" ? "tab active" : "tab"} onClick={() => setTab("teach")}>
-            📚 Teach
-          </button>
-          <button className={tab === "history" ? "tab active" : "tab"} onClick={() => setTab("history")}>
-            📋 History
-          </button>
+          <button className={tab === "speak" ? "tab active" : "tab"} onClick={() => setTab("speak")}>🎤 Speak</button>
+          <button className={tab === "teach" ? "tab active" : "tab"} onClick={() => setTab("teach")}>📚 Teach</button>
+          <button className={tab === "history" ? "tab active" : "tab"} onClick={() => setTab("history")}>📋 History</button>
         </nav>
       </header>
 
       <main className="main">
-        {/* ── SPEAK TAB ── */}
         {tab === "speak" && (
           <div className="speak-panel">
             {phase === "idle" && (
               <div className="idle-state">
                 <div className="big-hint">Press and hold to speak</div>
-                <button
-                  className="record-btn"
-                  onMouseDown={startRecording}
-                  onMouseUp={stopRecording}
-                  onTouchStart={startRecording}
-                  onTouchEnd={stopRecording}
-                >
+                <button className="record-btn" onMouseDown={startRecording} onMouseUp={stopRecording} onTouchStart={startRecording} onTouchEnd={stopRecording}>
                   <span className="mic-icon">🎤</span>
                 </button>
                 <p className="hint-text">Hold the button while speaking, then release</p>
@@ -168,11 +159,7 @@ export default function App() {
             {phase === "recording" && (
               <div className="recording-state">
                 <div className="pulse-ring" />
-                <button
-                  className="record-btn recording"
-                  onMouseUp={stopRecording}
-                  onTouchEnd={stopRecording}
-                >
+                <button className="record-btn recording" onMouseUp={stopRecording} onTouchEnd={stopRecording}>
                   <span className="mic-icon">🎙️</span>
                 </button>
                 <p className="recording-label">Listening... Release when done</p>
@@ -202,13 +189,9 @@ export default function App() {
                 <div className="result-card corrected-card">
                   <label>Clear version</label>
                   <p>{corrected}</p>
-                  <button className="speak-btn" onClick={() => speak(corrected)}>
-                    🔊 Speak again
-                  </button>
+                  <button className="speak-btn" onClick={() => speak(corrected)}>🔊 Speak again</button>
                 </div>
-                <button className="again-btn" onClick={reset}>
-                  🎤 Try again
-                </button>
+                <button className="again-btn" onClick={reset}>🎤 Try again</button>
               </div>
             )}
 
@@ -222,30 +205,19 @@ export default function App() {
           </div>
         )}
 
-        {/* ── TEACH TAB ── */}
         {tab === "teach" && (
           <div className="teach-panel">
             <h2>Teach me a word 🧠</h2>
-            <p className="teach-desc">
-              If I'm getting a word wrong, you can teach me the correct version here.
-            </p>
+            <p className="teach-desc">If I'm getting a word wrong, teach me the correct version here.</p>
             <div className="teach-form">
               <div className="field">
                 <label>What I heard (wrong)</label>
-                <input
-                  value={teachWrong}
-                  onChange={(e) => setTeachWrong(e.target.value)}
-                  placeholder="e.g. wader"
-                />
+                <input value={teachWrong} onChange={(e) => setTeachWrong(e.target.value)} placeholder="e.g. wader" />
               </div>
               <div className="arrow-teach">→</div>
               <div className="field">
                 <label>What it should be</label>
-                <input
-                  value={teachCorrect}
-                  onChange={(e) => setTeachCorrect(e.target.value)}
-                  placeholder="e.g. water"
-                />
+                <input value={teachCorrect} onChange={(e) => setTeachCorrect(e.target.value)} placeholder="e.g. water" />
               </div>
             </div>
             <button className="save-btn" onClick={handleTeach}>💾 Save correction</button>
@@ -253,7 +225,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ── HISTORY TAB ── */}
         {tab === "history" && (
           <div className="history-panel">
             <h2>Recent conversations 📋</h2>
