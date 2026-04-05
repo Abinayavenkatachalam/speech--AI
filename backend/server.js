@@ -2,49 +2,133 @@ require("dotenv").config();
 const express = require("express");
 const multer = require("multer");
 const cors = require("cors");
-const { exec } = require("child_process");
 const path = require("path");
 const fs = require("fs");
+const https = require("https");
+const FormData = require("form-data");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
+
 app.use(cors());
 app.use(express.json());
 
 const upload = multer({ dest: "tmp/" });
 if (!fs.existsSync("tmp")) fs.mkdirSync("tmp");
 
-// POST /transcribe — sends audio directly to Python (no ffmpeg needed!)
-app.post("/transcribe", upload.single("audio"), (req, res) => {
+// Helper — call OpenAI Whisper API
+function transcribeAudio(filePath) {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append("file", fs.createReadStream(filePath), {
+      filename: "audio.webm",
+      contentType: "audio/webm"
+    });
+    form.append("model", "whisper-1");
+
+    const options = {
+      hostname: "api.openai.com",
+      path: "/v1/audio/transcriptions",
+      method: "POST",
+      headers: {
+        ...form.getHeaders(),
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try {
+          const result = JSON.parse(data);
+          resolve(result.text || "");
+        } catch (e) {
+          reject(new Error("Failed to parse Whisper response"));
+        }
+      });
+    });
+
+    req.on("error", reject);
+    form.pipe(req);
+  });
+}
+
+// Helper — call Claude API to fix sentence
+function fixSentence(rawText) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 100,
+      messages: [{
+        role: "user",
+        content: `You are helping someone with Down syndrome communicate clearly.
+They said: "${rawText}"
+Rewrite this as a clear, natural English sentence. Return ONLY the sentence, nothing else.`
+      }]
+    });
+
+    const options = {
+      hostname: "api.anthropic.com",
+      path: "/v1/messages",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "Content-Length": Buffer.byteLength(body)
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try {
+          const result = JSON.parse(data);
+          resolve(result.content[0].text.trim());
+        } catch (e) {
+          resolve(rawText);
+        }
+      });
+    });
+
+    req.on("error", () => resolve(rawText));
+    req.write(body);
+    req.end();
+  });
+}
+
+// POST /transcribe
+app.post("/transcribe", upload.single("audio"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No audio file received" });
   }
 
-  const inputPath = req.file.path;
-  const scriptPath = path.join(__dirname, "correct_speech.py");
+  const filePath = req.file.path;
 
-  const env = {
-    ...process.env,
-    OPENAI_API_KEY: process.env.OPENAI_API_KEY || "",
-    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || ""
-  };
+  try {
+    // Step 1: Transcribe with OpenAI Whisper
+    const rawText = await transcribeAudio(filePath);
+    console.log("Transcribed:", rawText);
 
-  // No ffmpeg needed — OpenAI Whisper API accepts any audio format!
-  exec(`python3 ${scriptPath} ${inputPath}`, { env }, (pyErr, stdout, stderr) => {
-    fs.unlink(inputPath, () => {});
+    // Step 2: Fix sentence with Claude
+    const corrected = await fixSentence(rawText);
+    console.log("Corrected:", corrected);
 
-    if (pyErr) {
-      console.error("Python error:", stderr);
-      return res.status(500).json({ error: "Speech processing failed", detail: stderr });
-    }
+    fs.unlink(filePath, () => {});
 
-    try {
-      const result = JSON.parse(stdout.trim());
-      res.json(result);
-    } catch (e) {
-      res.status(500).json({ error: "Failed to parse output", raw: stdout });
-    }
-  });
+    res.json({
+      raw: rawText,
+      corrected: corrected,
+      word_corrected: corrected
+    });
+
+  } catch (err) {
+    fs.unlink(filePath, () => {});
+    console.error("Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // GET /dataset
