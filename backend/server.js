@@ -7,54 +7,44 @@ const path = require("path");
 const fs = require("fs");
 
 const app = express();
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json());
 
 const upload = multer({ dest: "tmp/" });
-
 if (!fs.existsSync("tmp")) fs.mkdirSync("tmp");
 
-// POST /transcribe
+// POST /transcribe — sends audio directly to Python (no ffmpeg needed!)
 app.post("/transcribe", upload.single("audio"), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No audio file received" });
   }
 
   const inputPath = req.file.path;
-  const wavPath = inputPath + ".wav";
   const scriptPath = path.join(__dirname, "correct_speech.py");
 
-  // Convert to wav using ffmpeg
-  exec(`ffmpeg -y -i ${inputPath} ${wavPath}`, (ffErr) => {
-    if (ffErr) {
-      console.error("ffmpeg error:", ffErr.message);
-      return res.status(500).json({ error: "Audio conversion failed. Is ffmpeg installed?" });
+  const env = {
+    ...process.env,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY || "",
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || ""
+  };
+
+  // No ffmpeg needed — OpenAI Whisper API accepts any audio format!
+  exec(`python3 ${scriptPath} ${inputPath}`, { env }, (pyErr, stdout, stderr) => {
+    fs.unlink(inputPath, () => {});
+
+    if (pyErr) {
+      console.error("Python error:", stderr);
+      return res.status(500).json({ error: "Speech processing failed", detail: stderr });
     }
 
-    const env = {
-      ...process.env,
-      OPENAI_API_KEY: process.env.OPENAI_API_KEY || "",
-      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || ""
-    };
-
-    exec(`python3 ${scriptPath} ${wavPath}`, { env }, (pyErr, stdout, stderr) => {
-      fs.unlink(inputPath, () => {});
-      fs.unlink(wavPath, () => {});
-
-      if (pyErr) {
-        console.error("Python error:", stderr);
-        return res.status(500).json({ error: "Speech processing failed", detail: stderr });
-      }
-
-      try {
-        const result = JSON.parse(stdout.trim());
-        res.json(result);
-      } catch (e) {
-        res.status(500).json({ error: "Failed to parse output", raw: stdout });
-      }
-    });
+    try {
+      const result = JSON.parse(stdout.trim());
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ error: "Failed to parse output", raw: stdout });
+    }
   });
 });
 
@@ -87,15 +77,6 @@ app.post("/dataset", (req, res) => {
   res.json({ ok: true });
 });
 
-// GET /personal-vocab
-app.get("/personal-vocab", (req, res) => {
-  const vocabPath = path.join(__dirname, "personal_vocab.json");
-  if (!fs.existsSync(vocabPath)) return res.json({});
-  const vocab = JSON.parse(fs.readFileSync(vocabPath, "utf-8"));
-  res.json(vocab);
-});
-
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Backend running at http://localhost:${PORT}`);
-  console.log(`📱 Mobile access: http://YOUR_IP:${PORT}`);
 });
